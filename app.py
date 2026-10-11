@@ -9,6 +9,7 @@ Step 1: the box of jobs.
 Next steps (read the CV, rank, explain, ask, update) build on this page.
 """
 import re
+import unicodedata
 
 import pandas as pd
 import streamlit as st
@@ -109,6 +110,23 @@ def pct(series):
     return f"{100 * series.mean():.0f}%" if len(series) else "–"
 
 
+def clean_place(s):
+    """'Montréal', 'MONTREAL ', 'Montreal, QC' -> 'Montreal', so the same city is listed once."""
+    if not isinstance(s, str) or not s.strip():
+        return ""
+    s = s.split(",")[0].strip()
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
+    return s.title()
+
+
+def clean_title(s):
+    """'Data Analyst - FT (Montreal)' -> 'Data Analyst', so similar postings are grouped under one position."""
+    if not isinstance(s, str) or not s.strip():
+        return ""
+    s = re.split(r"\s+[-–|/]\s+|\s*\(", s.strip())[0]
+    return s.strip().title()
+
+
 # ---- 1. load the data ---------------------------------------------------------
 sources = st.multiselect("Job sources", ["Job Bank (government)", "Company job sites"],
                          default=["Job Bank (government)"],
@@ -182,16 +200,45 @@ jobs["can_apply_why"] = [f[1] for f in fits]
 # The text the CV will be compared with later: the posting itself plus its occupation profile.
 jobs["all_text"] = jobs["all_text"] + " · " + jobs["noc"].map(lambda n: oasis.profile_text(profiles.get(n)))
 
+# Cleaned city and job position, used by the City and Job position filters.
+jobs["city_clean"] = jobs["city"].map(clean_place)
+# Some employers write the province in the city box ("Quebec", "Quebec"): treat that as no city.
+jobs.loc[jobs["city_clean"].str.lower() == jobs["province"].map(clean_place).str.lower(), "city_clean"] = ""
+jobs["location"] = jobs["city_clean"] + ", " + jobs["province"]
+jobs["position"] = jobs["title"].map(clean_title)
+
 # ---- 2. filters ---------------------------------------------------------------
 st.subheader("Find jobs")
-r1 = st.columns([1, 2, 1])
+
+# Row 1: where and what. Each box only lists what is left after the box before it.
+r1 = st.columns(3)
 provinces = sorted(p for p in jobs["province"].unique() if p)
 prov = r1[0].multiselect("Province", provinces,
-                         default=[p for p in provinces if re.search(r"qu[eé]bec|^qc$", p, re.I)])
-words = r1[1].text_input("Keywords in the job title or occupation",
-                         placeholder="e.g. analyst, nurse, accountant, développeur")
-posted_within = r1[2].selectbox("Posted within", ["Any time", "7 days", "14 days", "30 days", "60 days", "90 days"],
-                                help="Job Bank's files have no closing date. Older jobs are more likely to be filled.")
+                         default=[p for p in provinces if re.search(r"qu[eé]bec|^qc$", p, re.I)],
+                         placeholder="All provinces")
+
+pool = jobs[jobs["province"].isin(prov)] if prov else jobs
+city_counts = pool.loc[pool["city_clean"] != "", "location"].value_counts()
+cities = r1[1].multiselect("City", list(city_counts.index),
+                           format_func=lambda loc: f"{loc} ({city_counts[loc]:,})",
+                           placeholder="All cities in the chosen provinces",
+                           help="Pick as many cities as you want. Only cities in the chosen provinces are listed; "
+                                "the number is how many jobs each has. Type to search.")
+
+if cities:
+    pool = pool[pool["location"].isin(cities)]
+position_counts = pool.loc[pool["position"] != "", "position"].value_counts()
+positions = r1[2].multiselect("Job position", list(position_counts.index),
+                              format_func=lambda p: f"{p} ({position_counts[p]:,})",
+                              placeholder="All positions — type to search",
+                              help="Job titles found in the chosen places, most common first. Pick as many as you want.")
+
+# Row 2: free-text keywords and freshness
+r1b = st.columns([2, 1])
+words = r1b[0].text_input("Keywords in the job title or occupation",
+                          placeholder="e.g. analyst, nurse, accountant, développeur")
+posted_within = r1b[1].selectbox("Posted within", ["Any time", "7 days", "14 days", "30 days", "60 days", "90 days"],
+                                 help="Job Bank's files have no closing date. Older jobs are more likely to be filled.")
 
 r2 = st.columns(4)
 edu_labels = ["Any", "No degree required", "Secondary (high) school", "College, CEGEP, trade or apprenticeship",
@@ -207,6 +254,10 @@ langs = r2[3].multiselect("Language of work", ["English", "French", "English and
 view = jobs
 if prov:
     view = view[view["province"].isin(prov)]
+if cities:
+    view = view[view["location"].isin(cities)]
+if positions:
+    view = view[view["position"].isin(positions)]
 if words.strip():
     pattern = "|".join(re.escape(w.strip()) for w in words.split(",") if w.strip())
     view = view[view["title"].str.contains(pattern, case=False, na=False, regex=True)
